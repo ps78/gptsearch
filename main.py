@@ -11,16 +11,17 @@ from chat import Config, ChatInterface
 openai.api_key = Path('apikey').read_text()
 
 qa_file = "./resources/viseca_homepage/QA.xlsx"
-embeddings_file = "./resources/viseca_homepage/QA_embeddings2.csv"
+embeddings_file = "./resources/viseca_homepage/QA_embeddings.csv"
 
 chat = ChatInterface(qa_file, embeddings_file)
 
 question = "was ist meine limite?"
 
-sim = chat.get_relevant_context(question)
-for item in sim[:5]:
-    r = chat.context.iloc[item[1]]
-    print(f"{item[0]:.4f} - {item[1]:3} - {r.tokens:3} tokens : {r.language:7} {r.topic:20} {r.question}")
+answer = chat.get_answer(question, True)
+print(f"\nAnswer:\n<<{answer}>>\n")
 
-#answer = prepro.answer_query_with_context(question, True)
+#for sim, entry in context[:5]:    
+#    print(f"{sim:.4f} id {entry.id:3} : {entry.tokens:3} tokens : {entry.language:3} {entry.topic:20} {entry.question}")
+
+#answer = .answer_query_with_context(question, True)
 #print(answer)

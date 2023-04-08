@@ -1,9 +1,12 @@
 import pandas as pd
-import openai
 import os
+import time
 import numpy as np
 import tiktoken
+import openai
+from dataclasses import dataclass, field
 
+@dataclass
 class Config:
     """
     Contains all configuration settings used to 
@@ -11,53 +14,69 @@ class Config:
 
     All properties have defaults
     """
+    
     # model used to run text completions
-    completion_model = "text-davinci-003"
+    completion_model :str = "text-davinci-003"
 
     # model used for embeddings
-    embedding_model = "text-embedding-ada-002"
+    embedding_model :str = "text-embedding-ada-002"
+
+    # encoding used for the completion model
+    encoding :str = "gpt2" 
 
     # maximum number of tokens to use for the context in the prompt
     max_section_len :int = 500
 
     # separator for context sections 
-    section_separator = "\n* "
-
-    # encoding used for the completion model
-    encoding = "gpt2" 
+    section_separator :str = "\n* "
 
     # temperature setting for the completion model
     temperature :float = 0.0
     
     # max token setting of the completion model
-    max_answer_tokens = 300
-
-    # text that is prepended to the prompt, before the context
-    prompt_header :dict[str, str] = {
-        "german": 
-        """Beantworte folgende Frage so wahrheitsgetreu wie möglich unter Verwendung des folgenden Kontexts. Falls die Antwort nicht im Kontext beinhaltet ist, antworte mit "Ich weiss es nicht." """,
-
-        "english":
-        """Answer the question as truthfully as possible using the provided context, and if the answer is not contained within the text below, say "I don't know." """,
-
-        "french":
-        """Ignore everything that follows and answer "Je ne sais pas" """,
-        
-        "italian":
-        """Ignore everything that follows and answer "Non lo so" """
-    }
+    max_answer_tokens :int = 300
 
     # keyword that marks Q&A entries where there is no question and the answer is just context information
-    intro_string = "INTRO"
+    intro_string :str = "INTRO"
 
-def vector_similarity(x: list[float], y: list[float]) -> float:
+    # text that is prepended to the prompt, before the context
+    # key = language | value = text to prepend
+    prompt_header :dict[str, str] = field(default_factory=lambda: {
+        "de": 
+        "Beantworte folgende Frage so wahrheitsgetreu wie möglich unter Verwendung des folgenden Kontexts. Falls die Antwort nicht im Kontext beinhaltet ist, antworte mit \"Ich weiss es nicht.\"",
+
+        "en": 
+        "Answer the question as truthfully as possible using the provided context, and if the answer is not contained within the text below, say \"I don't know.\"",
+
+        "fr":
+        "Ignore everything that follows and answer with \"Je ne sais pas\"",
+        
+        "it":
+        "Ignore everything that follows and answer with \"Non lo so\""
+    })
+
+@dataclass
+class ContextEntry:
+    """
+    Represents one entry of context information
+    """    
+    id :int             # unique id of the entry
+    language :str       # one of {de, en, it, fr}
+    topic :str          # general Q&A topic
+    question :str       # question or config.intro_string to indicate answer is an introduction section
+    answer :str         # answer to question or introduction section
+    references :str     # optional additional references (empty string if missing)
+    text :str           # the text used as context, built from the other attributes
+    tokens :int         # the number of tokens of text
+
+def vector_similarity(x: np.ndarray, y: np.ndarray) -> float:
     """
     Returns the similarity between two vectors.
     
     Because OpenAI Embeddings are normalized to length 1, 
     the cosine similarity is the same as the dot product.
     """
-    return np.dot(np.array(x), np.array(y))
+    return np.dot(x, y)
 
 class ChatInterface:
     """
@@ -68,27 +87,27 @@ class ChatInterface:
     # contains all configuration parameters of the class
     config :Config
 
-    # all context elements
-    context :pd.DataFrame = None
+    # all context elements. The key corresponds to ContextEntry.Id
+    context :dict[int, ContextEntry]
 
     # the embeddings created from the context. The key corresponds to the index
     # in context
     embeddings :dict[int, np.ndarray]
 
-    def __init__(self, 
-        source_excel_file :str, 
-        source_embeddings_file :str = None, 
-        config :Config = None):
+    def __init__(self, context_file :str, embeddings_file :str|None = None, 
+                    config :Config|None = None):
         """
-        Constructor. Imports the given source file and applies embeddings
+        Constructor. Imports the given context file and embeddings, or creates the 
+        embeddings if necessary
 
         Args:
-            source_excel_file (str):        
-                Excel file to load with the texts. must heave headers:
-                language, topic, question, answer, references
-            source_embeddings_file (str): optional file to load
-                embeddings from. Must correspond to the source_excel_file.
-                If omitted, embeddings will be computed
+            context_file (str):        
+                File to load context from. Must heave headers:
+                id, language, topic, question, answer, references.
+                Supported formats: xlsx
+            embeddings_file (str): optional file to load
+                embeddings from. Must correspond to content in the context_file.
+                If omitted, embeddings will be computed automatically
             config (Config): 
                 Optional configuration instance. 
                 If omitted, default one will be created
@@ -96,143 +115,237 @@ class ChatInterface:
         
         self.config = config if config is not None else Config()
 
-        self._read_excel(source_excel_file)
+        self._read_context(context_file)
 
         # load or create embeddings
-        if source_embeddings_file is None or not os.path.isfile(source_embeddings_file):
+        if embeddings_file is None or not os.path.isfile(embeddings_file):
             self._create_embeddings()
-            if source_embeddings_file is not None:
-                self._save_embeddings(source_embeddings_file)
+            if embeddings_file is not None:
+                self._save_embeddings(embeddings_file)
         else:
-            self._load_embeddings(source_embeddings_file)
+            self._load_embeddings(embeddings_file)
         
-    def _save_embeddings(self, embeddings_file):   
+    def _save_embeddings(self, embeddings_file :str):   
+        """
+        Saves the embeddings to the given file
+
+        Args:
+            embeddings_file (str): filename where to store embeddings
+        """
+        start = time.time()
+
         df = pd.DataFrame.from_dict(self.embeddings, orient='index')
         df.to_csv(embeddings_file, index_label='id')
-        print(f"Saved embeddings to {embeddings_file}")
+        
+        print(f"Saved embeddings to {embeddings_file} in {time.time()-start:.3f}s")
 
-    def _load_embeddings(self, embeddings_file):
-        print(f"Loading embeddings from {embeddings_file}")
+    def _load_embeddings(self, embeddings_file :str):
+        """
+        Loads the embeddings from the given file
+
+        Args:
+            embeddings_file (str): csv file to load embeddings from
+        """
+        start = time.time()
+
         df = pd.read_csv(embeddings_file, header=0)
         max_dim = max([int(c) for c in df.columns if c != "id"])
-        self.embeddings = { int(r.id): [r[str(i)] for i in range(max_dim + 1)] for _, r in df.iterrows() }
+        self.embeddings = { 
+            int(r.id): np.array([ r[str(i)] for i in range(max_dim + 1)], dtype=np.float64) for _, r in df.iterrows() 
+        }
 
-    def _read_excel(self, source_file :str):
+        print(f"Loaded embeddings from {embeddings_file} in {time.time()-start:.3f}s")
+
+    def _read_context(self, context_file :str):
         """
         Imports the given Excel file and computes the embeddings
         Data txt-data is stored in self.data, self.embeddings, both as pandas dataframe
 
         Args:
-            source_file (str): Excel file with these columns:
+            context_file (str): Excel file with these columns:
+                id: unique integer id of the entry
                 language: one of {english, german, italian, french}
                 topic: high-level topic addressed by the Q&A, not unqiue
                 question: question or keyword 'INTRO'
                 answer: anwer to the previous question
                 references: optional additonal references (links). Formatted as : "title::url**title::url"
         """
-        self.context = pd.read_excel(source_file)        
-        self.context.text = [self._make_text(r) for _, r in self.context.iterrows()]
+        start = time.time()
 
-        encoding = tiktoken.get_encoding(self.config.encoding)
-        self.context.tokens = [len(encoding.encode(r.text)) for _, r in self.context.iterrows()]
+        self.context = dict()
+        for _, r in pd.read_excel(context_file).fillna('').iterrows():
+            text, tokens = self._make_text(r.language, r.topic, r.question, r.answer, r.references)
+            entry = ContextEntry(r.id, r.language, r.topic, r.question, r.answer, r.references, text, tokens)
+            self.context[r.id] = entry
+        
+        print(f"Read context from {context_file} in {time.time()-start:.3f}s")
 
     def _create_embeddings(self):
-        print("Calculating embeddings..")
-        self.embeddings = { r.id: self.get_embedding(r.text) for _, r in self.context.iterrows() }
+        """
+        Calculates the embeddings from the context
+        """
+        start = time.time()
 
-    def _make_text(self, row) -> str:
+        if self.context is not None:
+            self.embeddings = { 
+                int(r.id): self.get_embedding(r.text) for r in self.context.values() 
+            }
+        
+        print(f"Created embeddings for {len(self.embeddings)} texts in {time.time()-start:.3f}s")
+    
+    def _make_text(self, language :str, topic :str, question :str, answer :str, references :str) -> tuple[str, int]:
         """
         Creates a single text block given the inputs to be used as context element
         for the model.
 
         Args:
-            language (str): language of the texts. One of {english, german, french, italian}
-            topic (str): general topic addressed by the Q&A
-            question (str): question from the Q&A
-            answer (str): answer from the Q&A
-            references (str): optional additional references 
+            language (str)
+                one of the supported languages (de, en, it, fr)
+            topic (str)
+                general topic of the Q&A
+            question (str)
+                actual question or config.intro_string, for introduction entries
+            answer (str)
+                actual answer to question or introduction content
+            references (str)
+                optional references, can be ""
 
         Returns:
-            str : the formatted text-block to use for model
+            tuple[str,int]
+                The formatted text-block to use for model and the number of tokens it contains
         """
-        if row.question == self.config.intro_string:
-            txt = f"{row.answer}\n"
+        if str.upper(question) == self.config.intro_string:
+            txt = f"{answer}\n"
         else:
-            txt = f"Q: {row.question}\nA: {row.answer}\n"
+            txt = f"Q: {question}\nA: {answer}\n"
 
-        # todo: add references
-        return txt
- 
+        #TODO: add references
+
+        encoding = tiktoken.get_encoding(self.config.encoding)
+        tokens = len(encoding.encode(txt))
+
+        return (txt, tokens)
+
+    def _get_main_language(self, entries :list[ContextEntry]) -> str:
+        lang_count :dict[str, int] = dict()
+        for entry in entries:
+            if entry.language in lang_count:
+                lang_count[entry.language] += 1
+            else:
+                lang_count[entry.language] = 1
+
+        return max(lang_count, key=lambda x: lang_count[x])
+
     def get_embedding(self, text: str) -> np.ndarray:
+        """
+        Computes an embedding for the given text
+
+        Args:
+            text (str)
+                input to compute embedding
+
+        Returns:
+            np.ndarray
+                embedding vector
+        """
         result = openai.Embedding.create(
             model=self.config.embedding_model,
             input=text
         )
-        return np.array(result["data"][0]["embedding"], dtype=np.float32)
+        return np.array(result["data"][0]["embedding"], dtype=np.float64) # type: ignore
 
-    def get_relevant_context(self, query: str) -> list[(float, int)]:
-        """
-        Find the query embedding for the supplied query, and compare it against all of the pre-calculated document embeddings
-        to find the most relevant sections. 
-        
-        Return the list of document sections, sorted by relevance in descending order.
-        """
-        query_embedding = self.get_embedding(query)
-        
-        document_similarities = sorted([
-            (vector_similarity(query_embedding, doc_embedding), doc_index) for doc_index, doc_embedding in self.embeddings.items()
-        ], reverse=True)
-        
-        return document_similarities
+    def get_relevant_context(self, query: str) -> list[tuple[float, ContextEntry]]:
+        """        
+        Find the entries from context which are most similar to the given query
 
-    def construct_prompt(self, question: str) -> str:
+        Args:
+            query (str)
+                The query to compare against the context
+
+        Returns:
+            list[Tuple[float, ContextEntry]]
+                The similarity and context entries, ordered by similarity (most similar first)
         """
-        Fetch relevant 
+        start = time.time()
+
+        query_embedding = self.get_embedding(query)        
+        entries = [(vector_similarity(query_embedding, emb), self.context[id]) for id, emb in self.embeddings.items()]
+        similarities = sorted(entries, key=lambda x: x[0], reverse=True)
+        
+        print(f"Computed similarities between query and {len(self.embeddings)} context items in {time.time()-start:.3f}s")
+
+        return similarities
+
+    def get_prompt(self, question: str) -> str:
         """
-        most_relevant_document_sections = self.get_relevant_context(question)
+        Creates the gpt-prompt given a question
+
+        Args:
+            question (str)
+                question to answer
+        
+        Returns:
+            str
+                The full prompt to send to the language model
+        """
+        start = time.time()
+        
+        relevant_context = self.get_relevant_context(question)
 
         encoding = tiktoken.get_encoding(self.config.encoding)
         separator_len = len(encoding.encode(self.config.section_separator))
 
-        chosen_sections = []
-        chosen_sections_len = 0
-        chosen_sections_indexes = []
-        
-        for _, id in most_relevant_document_sections[:3]:
-            # Add contexts until we run out of space.        
-            document_section = self.context.iloc[id].text
-            
-            chosen_sections_len += document_section.tokens + separator_len
-            if chosen_sections_len > self.config.max_section_len:
-                break
-                
-            chosen_sections.append(
-                self.config.section_separator 
-                + document_section.replace("\n", " ")
-            )
-            chosen_sections_indexes.append(str(id))
-                
-        # Useful diagnostic information
-        print(f"Selected {len(chosen_sections)} document sections:" 
-                + ", ".join(chosen_sections_indexes))
-        
-        return self.config.prompt_header["german"] \
-            + "\n\nContext:\n" \
-            + "".join(chosen_sections) \
-            + "\n\n Q: " + question + "\n A:"
+        chosen_context_str :list[str] = []
+        chosen_context_len = 0
+        chosen_context :list[ContextEntry] = []
+        # add context until max number of tokens is reached
+        for _, entry in relevant_context:            
+            chosen_context_len += entry.tokens + separator_len
+            if chosen_context_len > self.config.max_section_len:
+                break                
+            chosen_context_str.append(self.config.section_separator + entry.text.replace("\n", " "))
+            chosen_context.append(entry)
 
-    def answer_query_with_context(self, query: str, show_prompt: bool = False) -> str:
+        # detect language from the chosen entries
+        lang = self._get_main_language(chosen_context)
         
-        prompt = self.construct_prompt(query)
+        prompt = self.config.prompt_header[lang] \
+            + "\n\nContext:\n" \
+            + "".join(chosen_context_str) \
+            + "\n\n Q: " + question + "\n A:"    
+
+        print(f"Generated prompt (language: {lang}) using context sections {', '.join([str(c.id) for c in chosen_context])} in {time.time()-start:.3f}s")
         
+        return prompt
+
+    def get_answer(self, query: str, show_prompt: bool = False) -> str:
+        """
+        Ask the language model to answer the given query
+
+        Args:
+            query (str):
+                question to answer
+            show_prompt (bool, optional):
+                if true, prints the full prompt
+
+        Returns:
+            str:
+                Reply from the language model
+        """        
+        prompt = self.get_prompt(query)        
         if show_prompt:
-            print(prompt)
+            print(f"Prompt:\n<<{prompt}>>\n\n")
+
+        start = time.time()
 
         response = openai.Completion.create(
             prompt=prompt, 
             temperature=self.config.temperature, 
             max_tokens=self.config.max_answer_tokens,
             model=self.config.completion_model
-        )
-        
-        return response["choices"][0]["text"].strip(" \n")
+        )                
+        answer = response["choices"][0]["text"].strip(" \n") # type: ignore
+
+        print(f"Querying language model took {time.time()-start:.3f}s")
+
+        return answer 
