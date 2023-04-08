@@ -1,2 +1,4 @@
 apikey
 envs/
+__pycache__/
+.vscode/
