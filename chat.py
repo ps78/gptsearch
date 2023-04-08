@@ -49,10 +49,10 @@ class Config:
         "Answer the question as truthfully as possible using the provided context, and if the answer is not contained within the text below, say \"I don't know.\"",
 
         "fr":
-        "Ignore everything that follows and answer with \"Je ne sais pas\"",
+        "Répondez à la question le plus sincèrement possible en utilisant le contexte fourni et, si la réponse n'est pas contenue dans le texte ci-dessous, dites \"Je ne sais pas\"",
         
         "it":
-        "Ignore everything that follows and answer with \"Non lo so\""
+        "Rispondete alla domanda nel modo più veritiero possibile utilizzando il contesto fornito e, se la risposta non è contenuta nel testo sottostante, dite \"Non lo so\""
     })
 
 @dataclass
@@ -334,7 +334,7 @@ class ChatInterface:
         """        
         prompt = self.get_prompt(query)        
         if show_prompt:
-            print(f"Prompt:\n<<{prompt}>>\n\n")
+            print(f"Prompt:\n<<{prompt}>>\n")
 
         start = time.time()
 
