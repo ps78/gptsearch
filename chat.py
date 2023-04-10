@@ -1,10 +1,26 @@
-import pandas as pd
 import os
 import time
+import pandas as pd
 import numpy as np
+import logging
 import tiktoken
 import openai
 from dataclasses import dataclass, field
+
+# setup loggers
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+file_handler = logging.FileHandler('gptsearch.log')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
 @dataclass
 class Config:
@@ -137,7 +153,7 @@ class ChatInterface:
         df = pd.DataFrame.from_dict(self.embeddings, orient='index')
         df.to_csv(embeddings_file, index_label='id')
         
-        print(f"Saved embeddings to {embeddings_file} in {time.time()-start:.3f}s")
+        logger.info(f"Saved embeddings to {embeddings_file} in {time.time()-start:.3f}s")
 
     def _load_embeddings(self, embeddings_file :str):
         """
@@ -154,7 +170,7 @@ class ChatInterface:
             int(r.id): np.array([ r[str(i)] for i in range(max_dim + 1)], dtype=np.float64) for _, r in df.iterrows() 
         }
 
-        print(f"Loaded embeddings from {embeddings_file} in {time.time()-start:.3f}s")
+        logger.info(f"Loaded embeddings from {embeddings_file} in {time.time()-start:.3f}s")
 
     def _read_context(self, context_file :str):
         """
@@ -178,7 +194,7 @@ class ChatInterface:
             entry = ContextEntry(r.id, r.language, r.topic, r.question, r.answer, r.references, text, tokens)
             self.context[r.id] = entry
         
-        print(f"Read context from {context_file} in {time.time()-start:.3f}s")
+        logger.info(f"Read context from {context_file} in {time.time()-start:.3f}s")
 
     def _create_embeddings(self):
         """
@@ -191,7 +207,7 @@ class ChatInterface:
                 int(r.id): self.get_embedding(r.text) for r in self.context.values() 
             }
         
-        print(f"Created embeddings for {len(self.embeddings)} texts in {time.time()-start:.3f}s")
+        logger.info(f"Created embeddings for {len(self.embeddings)} texts in {time.time()-start:.3f}s")
     
     def _make_text(self, language :str, topic :str, question :str, answer :str, references :str) -> tuple[str, int]:
         """
@@ -272,7 +288,7 @@ class ChatInterface:
         entries = [(vector_similarity(query_embedding, emb), self.context[id]) for id, emb in self.embeddings.items()]
         similarities = sorted(entries, key=lambda x: x[0], reverse=True)
         
-        print(f"Computed similarities between query and {len(self.embeddings)} context items in {time.time()-start:.3f}s")
+        logger.info(f"Computed similarities between query and {len(self.embeddings)} context items in {time.time()-start:.3f}s")
 
         return similarities
 
@@ -314,7 +330,7 @@ class ChatInterface:
             + "".join(chosen_context_str) \
             + "\n\n Q: " + question + "\n A:"    
 
-        print(f"Generated prompt (language: {lang}) using context sections {', '.join([str(c.id) for c in chosen_context])} in {time.time()-start:.3f}s")
+        logger.info(f"Generated prompt (language: {lang}) using context sections {', '.join([str(c.id) for c in chosen_context])} in {time.time()-start:.3f}s")
         
         return prompt
 
@@ -334,7 +350,7 @@ class ChatInterface:
         """        
         prompt = self.get_prompt(query)        
         if show_prompt:
-            print(f"Prompt:\n<<{prompt}>>\n")
+            logger.debug(f"Prompt:\n<<{prompt}>>\n")
 
         start = time.time()
 
@@ -346,6 +362,7 @@ class ChatInterface:
         )                
         answer = response["choices"][0]["text"].strip(" \n") # type: ignore
 
-        print(f"Querying language model took {time.time()-start:.3f}s")
+        logger.debug(f"answer: {answer}")
+        logger.info(f"Querying language model took {time.time()-start:.3f}s")
 
         return answer 
