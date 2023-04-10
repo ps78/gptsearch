@@ -2,4 +2,5 @@ apikey
 envs/
 __pycache__/
 .vscode/
-*.log
+**/*.log
+**/*embeddings.csv

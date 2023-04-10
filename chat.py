@@ -1,3 +1,28 @@
+# **************************************************************************************************
+# Module:     chat
+#
+# Purpose:    Facilitates communication with Chat-GPT through the open-ai API.
+#             It uses a context file to inject domain-specific knowledge into 
+#             the prompt. 
+#
+# Usage:      Requires an api key to be present in the file 'apikey' in the root directory.
+#             Embeddings are automatically generated and stored if the embedding file is missing
+#             If the context file is modified, the embeddings-file must be manually deleted to
+#             enforce recomputuation of the embeddings.
+#             
+#             from chat import ChatInterface
+#             chat = ChatInterface(
+#                   context_file="./resources/homepage/QA.xlsx",
+#                   embeddings_file="./resources/homepage/QA_embeddings.csv"
+#             )
+#             question = "What are the fees for a gold card?"
+#             answer = chat.get_answer(question)
+#
+# Author:     Pascal Simon
+#
+# Date:       2023-04-10
+#
+# **************************************************************************************************
 import os
 import time
 import pandas as pd
@@ -5,9 +30,15 @@ import numpy as np
 import logging
 import tiktoken
 import openai
+from pathlib import Path
 from dataclasses import dataclass, field
 
-# setup loggers
+# set API-key
+openai.api_key = Path('apikey').read_text()
+
+# **************************************************************************************************
+# Setup loggers
+# **************************************************************************************************
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -22,11 +53,14 @@ console_handler.setLevel(logging.DEBUG)
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
+# **************************************************************************************************
+# Config class
+# **************************************************************************************************
 @dataclass
 class Config:
     """
     Contains all configuration settings used to 
-    prepare data and query the model
+    prepare data and query the model. Used by class ChatInterface
 
     All properties have defaults
     """
@@ -41,7 +75,7 @@ class Config:
     encoding :str = "gpt2" 
 
     # maximum number of tokens to use for the context in the prompt
-    max_section_len :int = 500
+    max_section_len :int = 1000
 
     # separator for context sections 
     section_separator :str = "\n* "
@@ -71,6 +105,24 @@ class Config:
         "Rispondete alla domanda nel modo più veritiero possibile utilizzando il contesto fornito e, se la risposta non è contenuta nel testo sottostante, dite \"Non lo so\""
     })
 
+    def __str__(self):
+        return f"""Config-instance:
+        - Completion model: {self.completion_model}
+        - Embedding model: {self.embedding_model}
+        - Encoding: {self.encoding}
+        - Max input tokens: {self.max_section_len}
+        - Temperature: {self.temperature}
+        - Max answer tokens: {self.max_answer_tokens}
+        - Intro identifier: {self.intro_string}
+        - Prompt header (en): {self.prompt_header['en']}
+        - Prompt header (de): {self.prompt_header['de']}
+        - Prompt header (fr): {self.prompt_header['fr']}
+        - Prompt header (it): {self.prompt_header['it']}
+        """    
+
+# **************************************************************************************************
+# ContextEntry class
+# **************************************************************************************************
 @dataclass
 class ContextEntry:
     """
@@ -85,15 +137,10 @@ class ContextEntry:
     text :str           # the text used as context, built from the other attributes
     tokens :int         # the number of tokens of text
 
-def vector_similarity(x: np.ndarray, y: np.ndarray) -> float:
-    """
-    Returns the similarity between two vectors.
-    
-    Because OpenAI Embeddings are normalized to length 1, 
-    the cosine similarity is the same as the dot product.
-    """
-    return np.dot(x, y)
 
+# *****************************************************************************************************
+# ChatInterface class
+# *****************************************************************************************************
 class ChatInterface:
     """
     Implements pre-processing of context data and provides methods 
@@ -130,6 +177,8 @@ class ChatInterface:
         """
         
         self.config = config if config is not None else Config()
+
+        logger.debug(f"Instantiated ChatInterface with configuration: {self.config}")
 
         self._read_context(context_file)
 
@@ -170,7 +219,7 @@ class ChatInterface:
             int(r.id): np.array([ r[str(i)] for i in range(max_dim + 1)], dtype=np.float64) for _, r in df.iterrows() 
         }
 
-        logger.info(f"Loaded embeddings from {embeddings_file} in {time.time()-start:.3f}s")
+        logger.info(f"Loaded {len(self.embeddings)} embeddings from {embeddings_file} in {time.time()-start:.3f}s")
 
     def _read_context(self, context_file :str):
         """
@@ -194,7 +243,7 @@ class ChatInterface:
             entry = ContextEntry(r.id, r.language, r.topic, r.question, r.answer, r.references, text, tokens)
             self.context[r.id] = entry
         
-        logger.info(f"Read context from {context_file} in {time.time()-start:.3f}s")
+        logger.info(f"Read {len(self.context)} context entries from {context_file} in {time.time()-start:.3f}s")
 
     def _create_embeddings(self):
         """
@@ -284,6 +333,16 @@ class ChatInterface:
         """
         start = time.time()
 
+        #TODO: the following code could potentially be speeded up if the embeddings are stored
+        # in a 2D-numpy array and the similarity is implemented as a matrix-vector multiplication, 
+        # without using a for loop
+        def vector_similarity(x: np.ndarray, y: np.ndarray) -> float:
+            """
+            Similarity between 2 vectors: Because OpenAI Embeddings are normalized to length 1, 
+            the cosine similarity is the same as the dot product.
+            """
+            return np.dot(x, y)
+
         query_embedding = self.get_embedding(query)        
         entries = [(vector_similarity(query_embedding, emb), self.context[id]) for id, emb in self.embeddings.items()]
         similarities = sorted(entries, key=lambda x: x[0], reverse=True)
@@ -306,52 +365,51 @@ class ChatInterface:
         """
         start = time.time()
         
-        relevant_context = self.get_relevant_context(question)
-
         encoding = tiktoken.get_encoding(self.config.encoding)
         separator_len = len(encoding.encode(self.config.section_separator))
 
+        relevant_context = self.get_relevant_context(question)
+        
         chosen_context_str :list[str] = []
         chosen_context_len = 0
         chosen_context :list[ContextEntry] = []
+        
         # add context until max number of tokens is reached
         for _, entry in relevant_context:            
-            chosen_context_len += entry.tokens + separator_len
-            if chosen_context_len > self.config.max_section_len:
-                break                
-            chosen_context_str.append(self.config.section_separator + entry.text.replace("\n", " "))
+            if chosen_context_len + entry.tokens + separator_len > self.config.max_section_len:
+                break            
             chosen_context.append(entry)
+            chosen_context_str.append(self.config.section_separator + entry.text.replace("\n", " "))            
+            chosen_context_len += entry.tokens + separator_len
 
         # detect language from the chosen entries
         lang = self._get_main_language(chosen_context)
         
-        prompt = self.config.prompt_header[lang] \
-            + "\n\nContext:\n" \
-            + "".join(chosen_context_str) \
-            + "\n\n Q: " + question + "\n A:"    
+        header = self.config.prompt_header[lang]
+        header_len = len(encoding.encode(header))
 
-        logger.info(f"Generated prompt (language: {lang}) using context sections {', '.join([str(c.id) for c in chosen_context])} in {time.time()-start:.3f}s")
+        prompt = header + "\n\nContext:\n" + "".join(chosen_context_str) + "\n\n Q: " + question + "\n A:"    
+        logger.debug(f"Prompt:\n<<{prompt}>>\n")
+
+        context_ids = ", ".join([str(c.id) for c in chosen_context])
+        logger.info(f"Generated prompt (language: {lang}) using context sections {context_ids} with total length of {header_len+chosen_context_len} tokens in {time.time()-start:.3f}s")
         
         return prompt
 
-    def get_answer(self, query: str, show_prompt: bool = False) -> str:
+    def get_answer(self, query: str) -> str:
         """
         Ask the language model to answer the given query
 
         Args:
             query (str):
                 question to answer
-            show_prompt (bool, optional):
-                if true, prints the full prompt
-
+            
         Returns:
             str:
                 Reply from the language model
         """        
         prompt = self.get_prompt(query)        
-        if show_prompt:
-            logger.debug(f"Prompt:\n<<{prompt}>>\n")
-
+        
         start = time.time()
 
         response = openai.Completion.create(
